@@ -1,0 +1,998 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>성실 레벨 업 프로젝트 — PWA (v9.1 Final)</title>
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#0f172a">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/htm@3.1.1/dist/htm.umd.js"></script>
+  <style>
+    html,body{height:100%}
+    .card{ border-radius:1rem; border:1px solid #e2e8f0; background:#fff; box-shadow:0 1px 2px rgba(0,0,0,.04); }
+    .btn{ display:inline-flex; align-items:center; justify-content:center; padding:.5rem .75rem; border-radius:.75rem; border:1px solid #cbd5e1; background:#fff; }
+    .btn:hover{ background:#f8fafc }
+    .btn-primary{ background:#0f172a; color:#fff; border-color:#0f172a }
+    .btn-ghost{ border-color:transparent }
+    .input{ width:100%; border:1px solid #cbd5e1; border-radius:.75rem; padding:.5rem .75rem }
+    .label{ font-size:.75rem; color:#475569 }
+    .switch{ width:38px; height:22px }
+    .switch input{ display:none }
+    .switch span{ display:block; width:100%; height:100%; background:#e2e8f0; border-radius:9999px; position:relative; transition:.2s }
+    .switch span:after{ content:''; position:absolute; top:2px; left:2px; width:18px; height:18px; background:#fff; border-radius:9999px; transition:.2s; box-shadow:0 1px 2px rgba(0,0,0,.2) }
+    .switch input:checked + span{ background:#0f172a }
+    .switch input:checked + span:after{ transform:translateX(16px) }
+    .pixelate{ image-rendering: pixelated }
+    .modal{ position:fixed; inset:0; background:rgba(0,0,0,.4); display:flex; align-items:center; justify-content:center; padding:1rem }
+    details summary::-webkit-details-marker{display:none}
+    details summary{cursor:pointer}
+  </style>
+</head>
+<body class="min-h-full bg-gradient-to-b from-slate-50 to-white text-slate-900 p-4 md:p-8">
+  <div id="root"></div>
+
+  <script>
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("./sw-v91.js").then(async (reg)=>{try{const regs=await navigator.serviceWorker.getRegistrations();regs.forEach(r=>{try{if(!String(r.active && r.active.scriptURL||r.scriptURL).endswith("sw-v91.js")) r.unregister();}catch{}});}catch{}}).catch(()=>{});
+      });
+    }
+  </script>
+
+  <script>
+    const html = htm.bind(React.createElement);
+    const LS_KEY = 'dlu.v9.final';
+    const DAY_MS = 24*60*60*1000;
+    const fmtDate = d => new Date(d).toISOString().slice(0,10);
+    const addDays = (dateStr, n) => fmtDate(new Date(new Date(dateStr+'T00:00:00').getTime() + n*DAY_MS));
+    const todayStr = fmtDate(new Date());
+    const clamp01 = x => Math.max(0, Math.min(1, x));
+    const percent = n => Math.round(n*100);
+    const uuid = () => (window.crypto && crypto.randomUUID ? crypto.randomUUID() : ('id_' + Math.random().toString(36).slice(2)));
+
+    // ---------- Items (dynamic) ----------
+    const defaultItemDefs = [
+      { id: uuid(), name:'탐식의 마도서', hasFragments:true, combineCount:5, autoSupply:true, cap:3, description:'' },
+      { id: uuid(), name:'환식의 계약서', hasFragments:true, combineCount:5, autoSupply:true, cap:3, description:'' },
+      { id: uuid(), name:'현자의 보급 주문서', hasFragments:true, combineCount:5, autoSupply:true, cap:3, description:'' },
+      { id: uuid(), name:'소망의 결정', hasFragments:true, combineCount:5, autoSupply:false, cap:null, description:'' },
+      { id: uuid(), name:'성실 방어막', hasFragments:false, combineCount:0, autoSupply:false, cap:3, description:'하루 페널티/소멸 면제' },
+    ];
+
+    const defaultCategories = ['다이어트','그림','코딩/자격증','영어','생활 교양','책 쓰기','생활 습관','기타'];
+    const defaultWeeklyTemplate = ['핵심 습관 A','핵심 습관 B','핵심 습관 C'];
+
+    const defaultInventoryFromDefs = (defs) => {
+      const items = {}; const fragments = {};
+      defs.forEach(d => {
+        items[d.name] = 0;
+        if(d.hasFragments) fragments[d.name] = 0;
+      });
+      return { items, fragments };
+    };
+
+    // Saturday week helpers
+    const startOfSaturdayWeek = (dateStr) => {
+      const d = new Date(dateStr + 'T00:00:00');
+      const dow = d.getDay(); // 0=Sun..6=Sat
+      const sub = (dow - 6 + 7) % 7; // back to Saturday
+      const s = new Date(d); s.setDate(d.getDate() - sub);
+      return fmtDate(s);
+    };
+    const saturdayWeekNo = (anchorSaturdayStr, anyDateStr) => {
+      const a = new Date(startOfSaturdayWeek(anchorSaturdayStr) + 'T00:00:00');
+      const b = new Date(startOfSaturdayWeek(anyDateStr) + 'T00:00:00');
+      const diffDays = Math.floor((b - a)/DAY_MS);
+      return Math.max(1, Math.floor(diffDays/7) + 1);
+    };
+
+    function addItemWithCap(inv, defs, name, amount){
+      const def = defs.find(d => d.name===name);
+      const cap = (def && typeof def.cap==='number') ? def.cap : Infinity;
+      const cur = inv.items[name] || 0;
+      let next = cur + amount;
+      if(amount >= 0) next = Math.min(cap, next);
+      else next = Math.max(0, next);
+      inv.items[name] = next;
+    }
+    function autoCombineFragments(inv, defs){
+      defs.forEach(def => {
+        if(!def.hasFragments) return;
+        const need = Math.max(1, def.combineCount||5);
+        inv.fragments[def.name] = inv.fragments[def.name] || 0;
+        inv.items[def.name] = inv.items[def.name] || 0;
+        while(inv.fragments[def.name] >= need){
+          // respect cap
+          const cap = (typeof def.cap==='number') ? def.cap : Infinity;
+          if(inv.items[def.name] >= cap) break;
+          inv.fragments[def.name] -= need;
+          inv.items[def.name] += 1;
+        }
+      });
+    }
+    function normalizeInventory(inv, defs){
+      // ensure keys for all defs
+      defs.forEach(def => {
+        if(!(def.name in inv.items)) inv.items[def.name]=0;
+        if(def.hasFragments && !(def.name in inv.fragments)) inv.fragments[def.name]=0;
+        if(!def.hasFragments && (def.name in inv.fragments)) delete inv.fragments[def.name];
+        // clamp cap
+        const cap = (typeof def.cap==='number') ? def.cap : Infinity;
+        if(inv.items[def.name] > cap) inv.items[def.name] = cap;
+      });
+      // remove stray keys for deleted items
+      Object.keys(inv.items).forEach(k => { if(!defs.find(d=>d.name===k)) delete inv.items[k]; });
+      Object.keys(inv.fragments).forEach(k => { if(!defs.find(d=>d.name===k && d.hasFragments)) delete inv.fragments[k]; });
+    }
+
+    function migrateState(s){
+      s = s || {};
+      s.profile = s.profile || { level: 1, xp: 0, nextLevelXp: 100 };
+      s.weekNumber = s.weekNumber || 1;
+
+      // Items
+      s.itemDefs = Array.isArray(s.itemDefs)&&s.itemDefs.length? s.itemDefs : defaultItemDefs.map(d=>({...d, id: uuid()}));
+      // if legacy inventory by fixed keys, adopt; otherwise from defs
+      s.inventory = s.inventory || defaultInventoryFromDefs(s.itemDefs);
+      normalizeInventory(s.inventory, s.itemDefs);
+
+      // Settings
+      s.settings = Object.assign({
+        xpPenaltyRate:0.5, extraMissionRate:0.6, minibossRewardFragments:1,
+        locale:'ko-KR', sfx:true, sfxVolume:0.4,
+        autoWeek:true,
+        weekAnchorSaturday: startOfSaturdayWeek(fmtDate(new Date())),
+        supplyAnchorDate: fmtDate(new Date()),
+        supplyGivenPeriods: 0
+      }, s.settings||{});
+
+      // Categories
+      s.categories = Array.isArray(s.categories) && s.categories.length ? s.categories : defaultCategories.slice();
+      if(!s.categories.includes('기타')) s.categories.push('기타');
+
+      // Days
+      s.days = s.days || {};
+      const hasAny = Object.values(s.days).some(d => (d.missions||[]).length>0);
+      if(!hasAny){
+        const cats = s.categories;
+        s.days[fmtDate(new Date())] = { date: fmtDate(new Date()), missions: [
+          { id: uuid(), title:'유산소 운동 40분', category: cats.includes('다이어트')?'다이어트':(cats[0]||'기타'), plannedXp:40, done:false, pixelate:true },
+          { id: uuid(), title:'크로키 2장', category: cats.includes('그림')?'그림':(cats[0]||'기타'), plannedXp:35, done:false, pixelate:true },
+          { id: uuid(), title:'C 강의 1강', category: cats.includes('코딩/자격증')?'코딩/자격증':(cats[0]||'기타'), plannedXp:30, done:false },
+          { id: uuid(), title:'영단어 암기 30분', category: cats.includes('영어')?'영어':(cats[0]||'기타'), plannedXp:25, done:false },
+        ], settled:false, dayXpAwarded:0, shieldUsed:false };
+      } else {
+        Object.values(s.days).forEach(d => { if(typeof d.shieldUsed === 'undefined') d.shieldUsed = false; });
+      }
+
+      // Weekly checks
+      s.weeklyChecks = s.weeklyChecks || {};
+      s.weekTemplateTitles = s.weekTemplateTitles || defaultWeeklyTemplate.slice();
+      const wk = startOfSaturdayWeek(fmtDate(new Date()));
+      if(!s.weeklyChecks[wk]){
+        s.weeklyChecks[wk] = { items: s.weekTemplateTitles.map(t => ({ id: uuid(), title: t, done:false })) };
+      }
+
+      // Recommend
+      s.recommendTemplates = s.recommendTemplates || [
+        { id: uuid(), title:'크로키 2장', category:'그림', plannedXp:35, pixelate:true, hint:'주 3~5회' },
+        { id: uuid(), title:'유산소 40분', category:'다이어트', plannedXp:40, pixelate:true },
+        { id: uuid(), title:'영단어 30분', category:'영어', plannedXp:25, pixelate:true },
+        { id: uuid(), title:'C 강의 1강', category:'코딩/자격증', plannedXp:30 },
+        { id: uuid(), title:'독서 30쪽', category:'생활 교양', plannedXp:20 },
+      ];
+
+      // Undo snapshots
+      s.undoSnapshots = s.undoSnapshots || {}; // key: dateStr -> {profile, inventory, day, ui}
+
+      // UI
+      s.ui = s.ui || { levelChoicesRemaining: 0, showLevelModal: false };
+
+      return s;
+    }
+
+    function useSfx(enabled, volume){
+      const sounds = React.useMemo(()=> ({
+        click: new Audio("./click.wav"),
+        success: new Audio("./success.wav"),
+        fail: new Audio("./fail.wav"),
+      }), []);
+      React.useEffect(()=> { Object.values(sounds).forEach(a => a.volume = volume); }, [volume]);
+      const play = React.useCallback((name) => {
+        if(!enabled) return;
+        const a = sounds[name];
+        if(a){ try { a.currentTime = 0; a.play(); } catch(e){} }
+      }, [enabled, sounds]);
+      return play;
+    }
+
+    function ProgressBar({value}){
+      return html`<div className="h-2 bg-slate-200 rounded-xl overflow-hidden"><div className="h-full bg-slate-900" style=${{width: (Math.round((value||0)*100)) + '%'}} /></div>`;
+    }
+    function Tabs({tabs}){
+      const [active, setActive] = React.useState(tabs[0] && tabs[0].key);
+      return html`
+        <div className="w-full">
+          <div className="grid grid-cols-6 border rounded-xl overflow-hidden">
+            ${tabs.map(t => html`<button key=${t.key} className=${"px-3 py-2 text-sm " + (active===t.key? 'bg-slate-900 text-white':'bg-white hover:bg-slate-50')} onClick=${() => setActive(t.key)}>${t.label}</button>`)}
+          </div>
+          <div className="mt-4 card p-4">${(tabs.find(t=>t.key===active)||{}).content}</div>
+        </div>`;
+    }
+
+    // Weekly checklist
+    function useWeeklyChecklist(state, setState, selectedDate){
+      const weekKey = startOfSaturdayWeek(selectedDate);
+      const checklist = state.weeklyChecks[weekKey] ? JSON.parse(JSON.stringify(state.weeklyChecks[weekKey])) : null;
+      const ensureWeek = () => {
+        if(!state.weeklyChecks[weekKey]){
+          setState(p => {
+            const items = (p.weekTemplateTitles||[]).map(t => ({ id: uuid(), title:t, done:false }));
+            return {...p, weeklyChecks: {...p.weeklyChecks, [weekKey]: { items }}};
+          });
+        }
+      };
+      React.useEffect(ensureWeek, [weekKey]);
+      const updateChecklist = (updater) => {
+        setState(p => {
+          const current = p.weeklyChecks[weekKey] || { items: [] };
+          const next = updater(current);
+          return {...p, weeklyChecks: {...p.weeklyChecks, [weekKey]: next}};
+        });
+      };
+      const setTitlesAsTemplate = (items) => setState(p => ({...p, weekTemplateTitles: items.map(i => i.title)}));
+      return { weekKey, checklist, updateChecklist, setTitlesAsTemplate };
+    }
+
+    function CategoriesManager({state, setState}){
+      function renameCategory(oldName, newName){
+        if(!newName || state.categories.includes(newName)) return;
+        setState(prev => {
+          const cats = prev.categories.map(c => c===oldName? newName : c);
+          const newDays = {};
+          Object.entries(prev.days).forEach(([k, d]) => {
+            const missions = (d.missions||[]).map(m => m.category===oldName? {...m, category:newName} : m);
+            newDays[k] = {...d, missions};
+          });
+          return {...prev, categories: cats, days: newDays};
+        });
+      }
+      function deleteCategory(target){
+        if(target==='기타') { alert('“기타”는 삭제할 수 없습니다.'); return; }
+        setState(prev => {
+          const cats = prev.categories.filter(c => c!==target);
+          if(!cats.includes('기타')) cats.push('기타');
+          const newDays = {};
+          Object.entries(prev.days).forEach(([k, d]) => {
+            const missions = (d.missions||[]).map(m => m.category===target? {...m, category:'기타'} : m);
+            newDays[k] = {...d, missions};
+          });
+          return {...prev, categories: cats, days: newDays};
+        });
+      }
+      function addCategory(){
+        let base = '새 카테고리'; let name = base, i=1;
+        while(state.categories.includes(name)){ i+=1; name = base + ' ' + i; }
+        setState(prev => ({...prev, categories: [...prev.categories, name]}));
+      }
+      return html`<div className="space-y-2">
+        ${state.categories.map((c, idx) => html`
+          <div key=${idx} className="border rounded-xl p-3 flex items-center gap-2">
+            <input className="input flex-1" value=${c} onChange=${e => {
+              const v = e.target.value.trim();
+              setState(prev => {
+                const cats = prev.categories.slice();
+                cats[idx] = v || cats[idx];
+                return {...prev, categories: cats};
+              });
+            }} />
+            <button className="btn" onClick=${() => {
+              const v = prompt('새 이름으로 바꾸기', state.categories[idx]);
+              if(v && v.trim() && !state.categories.includes(v.trim())){
+                renameCategory(state.categories[idx], v.trim());
+              }
+            }}>이름 변경</button>
+            <button className="btn btn-ghost" disabled=${c==='기타'} onClick=${() => deleteCategory(c)}>🗑️ 삭제</button>
+          </div>
+        `)}
+        <button className="btn" onClick=${addCategory}>➕ 카테고리 추가</button>
+      </div>`;
+    }
+
+    function ItemsManager({state, setState}){
+      function updateDef(id, patch){
+        setState(prev => {
+          const defs = prev.itemDefs.map(d => d.id===id? {...d, ...patch} : d);
+          const inv = JSON.parse(JSON.stringify(prev.inventory));
+          normalizeInventory(inv, defs);
+          autoCombineFragments(inv, defs);
+          return {...prev, itemDefs: defs, inventory: inv};
+        });
+      }
+      function renameDef(id, newName){
+        setState(prev => {
+          const old = prev.itemDefs.find(d=>d.id===id); if(!old) return prev;
+          const defs = prev.itemDefs.map(d => d.id===id? {...d, name:newName} : d);
+          const inv = JSON.parse(JSON.stringify(prev.inventory));
+          // migrate inventory keys
+          if(old.name!==newName){
+            inv.items[newName] = (inv.items[old.name]||0);
+            delete inv.items[old.name];
+            if(old.hasFragments){
+              inv.fragments[newName] = (inv.fragments[old.name]||0);
+              delete inv.fragments[old.name];
+            }
+          }
+          normalizeInventory(inv, defs);
+          return {...prev, itemDefs: defs, inventory: inv};
+        });
+      }
+      function deleteDef(id){
+        setState(prev => {
+          const def = prev.itemDefs.find(d=>d.id===id);
+          if(!def) return prev;
+          const defs = prev.itemDefs.filter(d => d.id!==id);
+          const inv = JSON.parse(JSON.stringify(prev.inventory));
+          delete inv.items[def.name];
+          delete inv.fragments[def.name];
+          normalizeInventory(inv, defs);
+          return {...prev, itemDefs: defs, inventory: inv};
+        });
+      }
+      function addDef(){
+        const d = { id: uuid(), name:'새 아이템', hasFragments:false, combineCount:0, autoSupply:false, cap:1, description:'' };
+        setState(prev => {
+          const defs = [...prev.itemDefs, d];
+          const inv = JSON.parse(JSON.stringify(prev.inventory));
+          inv.items[d.name]=0;
+          normalizeInventory(inv, defs);
+          return {...prev, itemDefs: defs, inventory: inv};
+        });
+      }
+      return html`<div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="text-sm font-semibold">아이템 관리</div>
+          <button className="btn" onClick=${addDef}>➕ 추가</button>
+        </div>
+        <div className="space-y-2">
+          ${state.itemDefs.map(def => html`
+            <div key=${def.id} className="border rounded-xl p-3 space-y-2">
+              <div className="grid md:grid-cols-3 gap-2">
+                <input className="input" value=${def.name} onChange=${e=> renameDef(def.id, e.target.value)} />
+                <label className="flex items-center gap-2">
+                  <span className="label">조각 보유</span>
+                  <span className="switch"><input type="checkbox" checked=${!!def.hasFragments} onChange=${e=> updateDef(def.id, {hasFragments: e.target.checked})} /><span></span></span>
+                </label>
+                <label className="flex items-center gap-2">
+                  <span className="label">자동 보급</span>
+                  <span className="switch"><input type="checkbox" checked=${!!def.autoSupply} onChange=${e=> updateDef(def.id, {autoSupply: e.target.checked})} /><span></span></span>
+                </label>
+              </div>
+              <div className="grid md:grid-cols-3 gap-2 items-end">
+                <div>
+                  <div className="label">합성 필요 조각 수 (hasFragments)</div>
+                  <input className="input" type="number" value=${def.combineCount||0} onChange=${e=> updateDef(def.id, {combineCount: Math.max(0, Number(e.target.value)||0)})} />
+                </div>
+                <div>
+                  <div className="label">최대 보유(cap) — 빈칸=무제한</div>
+                  <input className="input" placeholder="" value=${(typeof def.cap==='number')? def.cap : ''} onChange=${e=> {
+                    const v = e.target.value.trim();
+                    updateDef(def.id, { cap: v===''? null : Math.max(0, Number(v)||0) });
+                  }} />
+                </div>
+                <div className="text-right">
+                  <button className="btn btn-ghost" onClick=${() => deleteDef(def.id)}>🗑️ 삭제</button>
+                </div>
+              </div>
+              <textarea className="input" rows="2" placeholder="설명" value=${def.description||''} onChange=${e=> updateDef(def.id, {description: e.target.value})}></textarea>
+              <div className="text-xs text-slate-500">인벤토리: 완성 ${state.inventory.items[def.name]||0}개${def.hasFragments? ` · 조각 ${state.inventory.fragments[def.name]||0}개` : ''}</div>
+            </div>
+          `)}
+        </div>
+      </div>`;
+    }
+
+    function Missions({day, state, setState, selectedDate, playSfx}){
+      function updateMission(id, patch){
+        setState(prev=> ({...prev, days:{...prev.days, [selectedDate]: {...day, missions: day.missions.map(m=> m.id===id? Object.assign({}, m, patch): m) }}}));
+      }
+      return html`<div className="space-y-3">
+        ${day.missions.length===0 && html`<div className="text-sm text-slate-500">미션이 없습니다. 아래 버튼으로 추가해 보세요.</div>`}
+        ${day.missions.map(m => html`
+          <div key=${m.id} className="border rounded-xl p-3 grid md:grid-cols-12 gap-2 items-center">
+            <div className="md:col-span-3">
+              <input className="input" aria-label="미션 제목" value=${m.title} onChange=${e=> updateMission(m.id, {title:e.target.value})} />
+            </div>
+            <div className="md:col-span-2">
+              <select className="input" value=${m.category} onChange=${e=> updateMission(m.id, {category:e.target.value})}>
+                ${state.categories.map(c => html`<option key=${c} value=${c}>${c}</option>`)}
+              </select>
+            </div>
+            <div className="md:col-span-2 flex items-end gap-2">
+              <div className="flex-1">
+                <div className="label">예정 XP</div>
+                <input className="input" type="number" value=${m.plannedXp} onChange=${e=> updateMission(m.id, {plannedXp:Number(e.target.value)})} />
+              </div>
+              <label className="switch mt-6">
+                <input type="checkbox" checked=${!!m.isExtra} onChange=${e=> updateMission(m.id, {isExtra:e.target.checked})} />
+                <span></span>
+              </label>
+              <span className="text-xs">추가</span>
+            </div>
+            <div className="md:col-span-3">
+              <textarea className="input" rows="2" placeholder="메모" value=${m.notes||''} onChange=${e=> updateMission(m.id, {notes:e.target.value})}></textarea>
+              <div className="grid grid-cols-5 gap-2 mt-2 items-end">
+                <div className="col-span-3">
+                  <div className="label">이미지 URL</div>
+                  <input className="input" placeholder="https://..." value=${m.imageUrl||''} onChange=${e=> updateMission(m.id, {imageUrl:e.target.value})} />
+                </div>
+                <label className="col-span-2 flex items-center gap-2">
+                  <span className="label">픽셀아트 모드</span>
+                  <span className="switch"><input type="checkbox" checked=${!!m.pixelate} onChange=${e=> updateMission(m.id, {pixelate:e.target.checked})} /><span></span></span>
+                </label>
+              </div>
+            </div>
+            <div className="md:col-span-2 flex items-center justify-end gap-2">
+              <button className=${"btn " + (m.done? 'btn-primary':'')} onClick=${() => { updateMission(m.id, {done: !m.done}); playSfx('click'); }}>${m.done? '✅ 완료':'… 미완료'}</button>
+              <button className="btn btn-ghost" onClick=${() => setState(prev=> ({...prev, days:{...prev.days, [selectedDate]: {...day, missions: day.missions.filter(x=>x.id!==m.id) }}}))}>🗑️</button>
+            </div>
+            ${m.imageUrl && html`<div className="md:col-span-12">
+              <img src=${m.imageUrl} alt="미션 이미지" className=${"w-full max-h-64 object-contain border rounded-xl " + (m.pixelate? 'pixelate':'')} />
+            </div>`}
+          </div>
+        `)}
+        <div className="flex gap-2">
+          <button className="btn" onClick=${() => setState(prev=> ({...prev, days:{...prev.days, [selectedDate]: {...day, missions:[...day.missions, { id: uuid(), title:'새 미션', category: state.categories[0]||'기타', plannedXp:20, done:false }] }}}))}>➕ 새 미션 만들기</button>
+        </div>
+      </div>`;
+    }
+
+    function InventoryPanel({state, setState}){
+      const defs = state.itemDefs;
+      return html`<div className="grid md:grid-cols-2 gap-4">
+        <div className="card p-4">
+          <div className="text-base font-semibold mb-2">🎲 조각</div>
+          <div className="space-y-2">
+            ${defs.filter(d=>d.hasFragments).map(d => html`
+              <div key=${d.id} className="flex items-center justify-between">
+                <div>${d.name}</div>
+                <div className="flex items-center gap-2">
+                  <span className="px-2 py-1 rounded-xl bg-slate-100">${state.inventory.fragments[d.name]||0}개</span>
+                  <button className="btn" onClick=${() => {
+                    setState(p => {
+                      const inv = JSON.parse(JSON.stringify(p.inventory));
+                      inv.fragments[d.name] = (inv.fragments[d.name]||0) + 1;
+                      autoCombineFragments(inv, p.itemDefs);
+                      return {...p, inventory: inv};
+                    });
+                  }}>+1</button>
+                </div>
+              </div>
+            `)}
+          </div>
+        </div>
+        <div className="card p-4">
+          <div className="text-base font-semibold mb-2">✨ 완성 아이템</div>
+          <div className="space-y-2">
+            ${defs.map(d => html`
+              <div key=${d.id} className="flex items-center justify-between">
+                <div>${d.name}</div>
+                <div className="flex items-center gap-2">
+                  <span className="px-2 py-1 rounded-xl bg-slate-100">${state.inventory.items[d.name]||0}개</span>
+                  ${d.name==='성실 방어막' ? html`` : html`<button className="btn" onClick=${() => {
+                    setState(p => {
+                      const inv = JSON.parse(JSON.stringify(p.inventory));
+                      addItemWithCap(inv, p.itemDefs, d.name, -1);
+                      return {...p, inventory: inv};
+                    });
+                  }}>-1</button>`}
+                </div>
+              </div>
+            `)}
+          </div>
+          <div className="text-xs text-slate-600 mt-2">* 각 아이템의 캡/합성 규칙은 설정 → 아이템 관리에서 바꿀 수 있어요.</div>
+        </div>
+      </div>`;
+    }
+
+    function RecommendedTab({state, setState, onAdd}){
+      return html`<div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="text-base font-semibold">✨ 추천 미션</div>
+          <button className="btn" onClick=${() => setState(p => ({...p, recommendTemplates:[...p.recommendTemplates, { id: uuid(), title:'새 추천', category: p.categories[0]||'기타', plannedXp:20, pixelate:false }]}))}>➕ 추가</button>
+        </div>
+        <div className="grid md:grid-cols-2 gap-3">
+          ${state.recommendTemplates.map((t,i) => html`
+            <div key=${t.id} className="card p-4 space-y-2">
+              <div className="grid grid-cols-2 gap-2">
+                <input className="input" value=${t.title} onChange=${e=> setState(p => ({...p, recommendTemplates: p.recommendTemplates.map(x => x.id===t.id? {...x, title:e.target.value}: x)}))} />
+                <select className="input" value=${t.category} onChange=${e=> setState(p => ({...p, recommendTemplates: p.recommendTemplates.map(x => x.id===t.id? {...x, category:e.target.value}: x)}))}>
+                  ${state.categories.map(c => html`<option key=${c} value=${c}>${c}</option>`)}
+                </select>
+                <input className="input" type="number" value=${t.plannedXp||0} onChange=${e=> setState(p => ({...p, recommendTemplates: p.recommendTemplates.map(x => x.id===t.id? {...x, plannedXp:Number(e.target.value)||0}: x)}))} />
+                <label className="flex items-center gap-2">
+                  <span className="label">픽셀</span>
+                  <span className="switch"><input type="checkbox" checked=${!!t.pixelate} onChange=${e=> setState(p => ({...p, recommendTemplates: p.recommendTemplates.map(x => x.id===t.id? {...x, pixelate:e.target.checked}: x)}))} /><span></span></span>
+                </label>
+              </div>
+              <div className="flex items-center justify-between">
+                <input className="input" placeholder="힌트(선택)" value=${t.hint||''} onChange=${e=> setState(p => ({...p, recommendTemplates: p.recommendTemplates.map(x => x.id===t.id? {...x, hint:e.target.value}: x)}))} />
+                <div className="flex gap-2">
+                  <button className="btn btn-primary" onClick=${() => onAdd(t)}>담기</button>
+                  <button className="btn btn-ghost" onClick=${() => setState(p => ({...p, recommendTemplates: p.recommendTemplates.filter(x => x.id!==t.id)}))}>🗑️</button>
+                </div>
+              </div>
+            </div>
+          `)}
+        </div>
+      </div>`;
+    }
+
+    function ReportTab({state}){
+      const [expanded, setExpanded] = React.useState(null); // weekKey
+      const keys = Object.keys(state.weeklyChecks).sort();
+      const rows = keys.map(weekKey => {
+        const items = state.weeklyChecks[weekKey].items || [];
+        const total = items.length || 1;
+        const done = items.filter(i=>i.done).length;
+        return { weekKey, total, done, pct: Math.round(done/total*100), items };
+      });
+      if(rows.length===0) return html`<div className="text-sm text-slate-500">아직 리포트가 없어요.</div>`;
+
+      function DayRow({dateStr}){
+        const d = state.days[dateStr];
+        const missions = (d && d.missions) ? d.missions : [];
+        const ok = missions.filter(m=>m.done);
+        const fail = missions.filter(m=>!m.done);
+        return html`<tr>
+          <td className="py-1 pr-3">${dateStr}</td>
+          <td className="py-1 pr-3">${ok.map(m=>m.title).join(', ') || '—'}</td>
+          <td className="py-1 pr-3">${fail.map(m=>m.title).join(', ') || '—'}</td>
+        </tr>`;
+      }
+
+      return html`<div className="space-y-4">
+        <div className="text-base font-semibold">📊 주간 목표 리포트</div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead><tr className="text-left border-b">
+              <th className="py-2 pr-3">주 시작(토)</th>
+              <th className="py-2 pr-3">달성률</th>
+              <th className="py-2 pr-3">목표 목록</th>
+            </tr></thead>
+            <tbody>
+              ${rows.map(r => html`
+                <tr key=${r.weekKey} className="border-b last:border-0 align-top hover:bg-slate-50 cursor-pointer" onClick=${() => setExpanded(expanded===r.weekKey? null : r.weekKey)}>
+                  <td className="py-2 pr-3 font-medium">${r.weekKey}</td>
+                  <td className="py-2 pr-3" style=${{minWidth:'160px'}}>
+                    <div className="flex items-center gap-2">
+                      <div className="w-40">${ProgressBar({ value: r.done/r.total })}</div>
+                      <div className="w-10 text-right">${r.pct}%</div>
+                    </div>
+                  </td>
+                  <td className="py-2 pr-3">
+                    ${r.items.map(i => html`<span className=${"inline-flex items-center gap-1 mr-2 mb-1 px-2 py-1 rounded-xl border " + (i.done? 'border-emerald-300 bg-emerald-50':'border-slate-200 bg-slate-50')}>
+                      ${i.done? '✅':'⬜️'} ${i.title}
+                    </span>`)}
+                  </td>
+                </tr>
+                ${expanded===r.weekKey && html`
+                  <tr><td colspan="3" className="py-2">
+                    <div className="card p-3">
+                      <div className="text-sm font-semibold mb-2">해당 주의 일자별 결과</div>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-xs">
+                          <thead><tr className="text-left border-b">
+                            <th className="py-1 pr-3">날짜</th>
+                            <th className="py-1 pr-3">달성</th>
+                            <th className="py-1 pr-3">미달성</th>
+                          </tr></thead>
+                          <tbody>
+                            ${[0,1,2,3,4,5,6].map(i => DayRow({dateStr: addDays(r.weekKey, i)}))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </td></tr>
+                `}
+              `)}
+            </tbody>
+          </table>
+        </div>
+      </div>`;
+    }
+
+    function WeeklySetupTab({state, setState, selectedDate}){
+      const { weekKey, checklist, updateChecklist, setTitlesAsTemplate } = useWeeklyChecklist(state, setState, selectedDate);
+      if(!checklist) return html`<div className="text-sm text-slate-500">불러오는 중…</div>`;
+      const items = checklist.items;
+      return html`
+        <div className="space-y-4">
+          <div className="text-base font-semibold">📝 주간 목표 설정 (체크는 홈에서)</div>
+          <div className="space-y-2">
+            ${items.map((it, idx) => html`
+              <div key=${it.id} className="border rounded-xl p-3 flex items-center gap-3">
+                <input className="input flex-1" value=${it.title} onChange=${e=> updateChecklist(cur => {
+                  const next = { ...cur, items: cur.items.map(x=> x.id===it.id? {...x, title:e.target.value}: x) };
+                  setTitlesAsTemplate(next.items);
+                  return next;
+                })} />
+                <button className="btn btn-ghost" onClick=${() => updateChecklist(cur => {
+                  const next = { ...cur, items: cur.items.filter(x=> x.id!==it.id) };
+                  setTitlesAsTemplate(next.items);
+                  return next;
+                })}>🗑️</button>
+              </div>
+            `)}
+          </div>
+          <div className="flex gap-2">
+            <button className="btn" onClick=${() => updateChecklist(cur => {
+              const next = { ...cur, items: [...cur.items, { id: uuid(), title:'새 목표', done:false }] };
+              setTitlesAsTemplate(next.items);
+              return next;
+            })}>➕ 항목 추가</button>
+          </div>
+          <div className="text-xs text-slate-500">* 체크/달성은 홈의 “주간 진행” 카드에서 합니다.</div>
+        </div>`;
+    }
+
+    function SettingsTab({state, setState}){
+      const s = state.settings;
+      return html`<div className="grid md:grid-cols-2 gap-4">
+        <div className="border rounded-xl p-3 space-y-3">
+          <div className="grid grid-cols-2 gap-2 items-end">
+            <div>
+              <div className="label">실패 페널티(%)</div>
+              <input className="input" type="number" value=${Math.round(s.xpPenaltyRate*100)} onChange=${e=> setState(p=>({...p, settings:{...p.settings, xpPenaltyRate: Number(e.target.value)/100 }}))} />
+            </div>
+            <div>
+              <div className="label">추가 미션 보상(%)</div>
+              <input className="input" type="number" value=${Math.round(s.extraMissionRate*100)} onChange=${e=> setState(p=>({...p, settings:{...p.settings, extraMissionRate: Number(e.target.value)/100 }}))} />
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-2 items-end">
+            <div>
+              <div className="label">미니보스 조각 보상</div>
+              <input className="input" type="number" value=${s.minibossRewardFragments} onChange=${e=> setState(p=>({...p, settings:{...p.settings, minibossRewardFragments: Number(e.target.value) }}))} />
+            </div>
+            <div>
+              <div className="label">표시 로케일</div>
+              <input className="input" value=${s.locale} onChange=${e=> setState(p=>({...p, settings:{...p.settings, locale: e.target.value }}))} />
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-2 items-end">
+            <label className="flex items-center gap-2">
+              <span className="label">효과음</span>
+              <span className="switch"><input type="checkbox" checked=${!!s.sfx} onChange=${e=> setState(p=> ({...p, settings:{...p.settings, sfx: e.target.checked}}))} /><span></span></span>
+            </label>
+            <div>
+              <div className="label">효과음 볼륨</div>
+              <input className="w-full" type="range" min="0" max="1" step="0.01" value=${s.sfxVolume} onChange=${e=> setState(p=> ({...p, settings:{...p.settings, sfxVolume: Number(e.target.value)}}))} />
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-2 items-end">
+            <label className="flex items-center gap-2">
+              <span className="label">주차 자동 계산</span>
+              <span className="switch"><input type="checkbox" checked=${!!s.autoWeek} onChange=${e=> setState(p=> ({...p, settings:{...p.settings, autoWeek: e.target.checked}}))} /><span></span></span>
+            </label>
+            <div>
+              <div className="label">주차 앵커 토요일(읽기전용)</div>
+              <input className="input" value=${state.settings.weekAnchorSaturday} disabled />
+            </div>
+          </div>
+
+          <div className="border-t pt-3 space-y-2">
+            <div className="text-sm font-semibold">📦 2주 보급</div>
+            <div className="grid grid-cols-2 gap-2 items-end">
+              <div>
+                <div className="label">보급 앵커 날짜</div>
+                <input type="date" className="input" value=${s.supplyAnchorDate} onChange=${e => {
+                  const val = e.target.value;
+                  setState(p => ({...p, settings:{...p.settings, supplyAnchorDate: val }}));
+                }} />
+              </div>
+              <button className="btn" onClick=${() => window.__settleSupply && window.__settleSupply()}>지금 보급 정산</button>
+            </div>
+            <div className="text-xs text-slate-500">* 보급은 14일마다 자동 계산되며, **자동 보급**이 켜진 아이템만 각 +1 지급돼요.</div>
+          </div>
+
+          <div className="border-t pt-3 space-y-2">
+            <div className="text-sm font-semibold">🏷️ 카테고리 관리</div>
+            ${html`<${CategoriesManager} state=${state} setState=${setState} />`}
+          </div>
+
+          <div className="border-t pt-3">
+            ${html`<${ItemsManager} state=${state} setState=${setState} />`}
+          </div>
+        </div>
+
+        <div className="border rounded-xl p-3 space-y-3">
+          <div className="text-sm font-medium">빠른 메모</div>
+          <textarea className="input" rows="8" placeholder="그날의 컨디션, 깨달음, 회고 등을 기록하세요." value=${state.quickNote||''} onChange=${e=> setState(p=> ({...p, quickNote: e.target.value}))}></textarea>
+        </div>
+      </div>`;
+    }
+
+    function App(){
+      const [state, setState] = React.useState(() => {
+        const raw = localStorage.getItem(LS_KEY);
+        const s = raw ? JSON.parse(raw) : null;
+        return migrateState(s);
+      });
+      const [selectedDate, setSelectedDate] = React.useState(todayStr);
+      React.useEffect(() => { localStorage.setItem(LS_KEY, JSON.stringify(state)); }, [state]);
+      const playSfx = useSfx(state.settings.sfx, state.settings.sfxVolume);
+
+      // ensure selected day exists OR carry over from previous day
+      const day = React.useMemo(() => state.days[selectedDate] || { date:selectedDate, missions:[], settled:false, dayXpAwarded:0, shieldUsed:false }, [state, selectedDate]);
+      React.useEffect(() => {
+        if(!state.days[selectedDate]){
+          const prevDate = addDays(selectedDate, -1);
+          const prev = state.days[prevDate];
+          const carried = prev && Array.isArray(prev.missions) && prev.missions.length>0
+            ? prev.missions.map(m => ({...m, id: uuid(), done:false}))
+            : [];
+          setState(prevState => ({...prevState, days:{...prevState.days, [selectedDate]: { date:selectedDate, missions: carried, settled:false, dayXpAwarded:0, shieldUsed:false }}}));
+        }
+      }, [selectedDate]);
+
+      // Weekly helpers
+      const { weekKey, checklist, updateChecklist } = useWeeklyChecklist(state, setState, selectedDate);
+      const wkItems = checklist ? checklist.items : [];
+      const weekPct = (wkItems.filter(i=>i.done).length) / (wkItems.length||1);
+
+      // Supply settlement (every 14 days) for autoSupply items
+      function settleSupply(nowStr){
+        const anchor = state.settings.supplyAnchorDate;
+        const diffDays = Math.floor((new Date(nowStr+'T00:00:00') - new Date(anchor+'T00:00:00'))/DAY_MS);
+        const elapsedPeriods = Math.max(0, Math.floor(diffDays / 14));
+        if(elapsedPeriods > state.settings.supplyGivenPeriods){
+          let times = elapsedPeriods - state.settings.supplyGivenPeriods;
+          const inv = JSON.parse(JSON.stringify(state.inventory));
+          while(times-- > 0){
+            state.itemDefs.forEach(def => {
+              if(def.autoSupply){
+                addItemWithCap(inv, state.itemDefs, def.name, 1);
+              }
+            });
+          }
+          setState(p => ({...p, inventory: inv, settings:{...p.settings, supplyGivenPeriods: elapsedPeriods }}));
+        }
+      }
+      window.__settleSupply = () => settleSupply(selectedDate);
+      React.useEffect(() => { settleSupply(selectedDate); }, [selectedDate, state.settings.supplyAnchorDate, state.itemDefs]);
+
+      // Level-up reward chooser
+      function claimLevelReward(name){
+        setState(prev => {
+          const inv = JSON.parse(JSON.stringify(prev.inventory));
+          addItemWithCap(inv, prev.itemDefs, name, 1);
+          const remaining = Math.max(0, (prev.ui.levelChoicesRemaining||0) - 1);
+          return {...prev, inventory: inv, ui:{...prev.ui, levelChoicesRemaining: remaining, showLevelModal: remaining>0}};
+        });
+      }
+
+      // Settle day
+      function xpForMission(m, rates){
+        const base = Number(m.plannedXp)||0;
+        const extra = m.isExtra ? base * rates.extraMissionRate : base;
+        return m.done ? extra : base * rates.xpPenaltyRate;
+      }
+      function settleDay(){
+        if(day.settled) return;
+        // save undo snapshot
+        const snapshot = { profile: state.profile, inventory: state.inventory, day: day, ui: state.ui };
+        const snapKey = selectedDate;
+        // compute awards
+        const rates = { xpPenaltyRate: day.shieldUsed ? 1.0 : state.settings.xpPenaltyRate, extraMissionRate: state.settings.extraMissionRate };
+        const awarded = Math.round(day.missions.reduce((s,m)=> s + xpForMission(m, rates), 0));
+        let level = state.profile.level;
+        let xp = state.profile.xp + awarded;
+        let next = state.profile.nextLevelXp;
+        let levelsGained = 0;
+        while(xp >= next){ xp -= next; level += 1; levelsGained += 1; next = Math.round(next * 1.25); }
+
+        const completionRate = (day.missions.filter(m=>m.done).length) / (day.missions.length || 1);
+        const chance = percent(clamp01(completionRate * 1.2));
+        const success = Math.random()*100 < chance;
+        const inv = JSON.parse(JSON.stringify(state.inventory));
+
+        let rewardText = '';
+        if(success){
+          const fragmentables = state.itemDefs.filter(d => d.hasFragments);
+          const pool = [...fragmentables.map(d => ({type:'frag', name:d.name}))];
+          if(state.itemDefs.find(d=>d.name==='성실 방어막')) pool.push({type:'item', name:'성실 방어막'});
+          if(pool.length>0){
+            const sel = pool[Math.floor(Math.random()*pool.length)];
+            if(sel.type==='frag'){
+              inv.fragments[sel.name] = (inv.fragments[sel.name]||0) + state.settings.minibossRewardFragments;
+              autoCombineFragments(inv, state.itemDefs);
+              rewardText = `${sel.name} 조각 +${state.settings.minibossRewardFragments}`;
+            }else{
+              addItemWithCap(inv, state.itemDefs, sel.name, 1);
+              rewardText = `${sel.name} +1`;
+            }
+          }
+        } else {
+          if(!day.shieldUsed){
+            const candidates = state.itemDefs.map(d=>d.name).filter(k => (inv.items[k]||0) > 0);
+            if(candidates.length > 0){
+              const lossKey = candidates[Math.floor(Math.random()*candidates.length)];
+              addItemWithCap(inv, state.itemDefs, lossKey, -1);
+              rewardText = `패배 페널티: ${lossKey} -1`;
+            } else {
+              rewardText = `패배: 잃을 완성 아이템 없음`;
+            }
+          } else {
+            rewardText = `패배: 방어막으로 소멸 면제`;
+          }
+        }
+
+        const newDay = { ...day, settled:true, dayXpAwarded: awarded, minibossResult: success? '성공':'실패', minibossChance: chance, rewardText };
+        setState(prev=> ({...prev, profile:{level, xp, nextLevelXp:next}, days:{...prev.days, [selectedDate]: newDay}, inventory:inv, ui:{...prev.ui, levelChoicesRemaining:(prev.ui.levelChoicesRemaining||0)+levelsGained, showLevelModal: ((prev.ui.levelChoicesRemaining||0)+levelsGained)>0 }, undoSnapshots:{...prev.undoSnapshots, [snapKey]: snapshot} }));
+        playSfx(success ? 'success' : 'fail');
+      }
+
+      function undoSettle(){
+        const snap = state.undoSnapshots[selectedDate];
+        if(!day.settled || !snap){ alert('취소할 정산 정보가 없습니다.'); return; }
+        // restore
+        const restoredDay = { ...snap.day, settled:false, dayXpAwarded:0, minibossResult: undefined, minibossChance: undefined, rewardText: undefined };
+        const restoredInv = JSON.parse(JSON.stringify(snap.inventory));
+        // If shield was used that day in snapshot, refund and reset usage
+        if(snap.day.shieldUsed){
+          // refund only if we can find the item def (name based)
+          if(restoredInv.items['성실 방어막']!==undefined){
+            restoredInv.items['성실 방어막'] = (restoredInv.items['성실 방어막']||0) + 1;
+          }
+          restoredDay.shieldUsed = false;
+        }
+        setState(prev => {
+          const nextSnaps = {...prev.undoSnapshots}; delete nextSnaps[selectedDate];
+          return {...prev, profile: snap.profile, inventory: restoredInv, days:{...prev.days, [selectedDate]: restoredDay}, ui: snap.ui, undoSnapshots: nextSnaps};
+        });
+      }
+
+      // Export/Import
+      function exportData(){
+        const blob = new Blob([JSON.stringify(state,null,2)], {type:'application/json'});
+        const url = URL.createObjectURL(blob); const a=document.createElement('a');
+        a.href = url; a.download = `성실레벨업_${selectedDate}.json`; a.click(); URL.revokeObjectURL(url);
+      }
+      function importData(file){ const r = new FileReader(); r.onload=()=>{ try{ const s=JSON.parse(String(r.result)); setState(migrateState(s)); alert('데이터를 불러왔어요!'); }catch{ alert('가져오기 실패: JSON 형식 오류'); } }; r.readAsText(file); }
+
+      // Home computed
+      const autoWeekNo = saturdayWeekNo(state.settings.weekAnchorSaturday, selectedDate);
+      const displayWeek = state.settings.autoWeek ? autoWeekNo : (state.weekNumber || 1);
+      const completionRateToday = (day.missions.filter(m=>m.done).length) / (day.missions.length || 1);
+      const minibossChance = percent(clamp01(completionRateToday * 1.2));
+
+      return html`<div className="max-w-6xl mx-auto grid gap-6">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
+            <div className="text-2xl">✨</div>
+            <h1 className="text-2xl md:text-3xl font-bold">성실 레벨 업 프로젝트 (PWA)</h1>
+            <div className="flex items-center gap-2">
+              <span className="px-2 py-1 rounded-xl bg-slate-100 text-slate-700 text-sm">주차</span>
+              ${state.settings.autoWeek ? html`<div className="flex items-center gap-2">
+                <span className="px-2 py-1 rounded-xl bg-slate-100">${displayWeek}주차</span>
+                <span className="text-xs text-slate-500">자동(토 시작)</span>
+              </div>` : html`<div className="flex items-center gap-2">
+                <button className="btn" onClick=${() => setState(p=> ({...p, weekNumber: Math.max(1, (p.weekNumber||1)-1)}))}>-</button>
+                <input className="input w-20 text-center" type="number" min="1" value=${state.weekNumber} onChange=${e=> setState(p=> ({...p, weekNumber: Math.max(1, Number(e.target.value)||1)}))} />
+                <button className="btn" onClick=${() => setState(p=> ({...p, weekNumber: (p.weekNumber||1)+1}))}>+</button>
+                <span className="text-xs text-slate-500">수동</span>
+              </div>`}
+              <label className="flex items-center gap-1 ml-2">
+                <span className="label">자동</span>
+                <span className="switch"><input type="checkbox" checked=${!!state.settings.autoWeek} onChange=${e=> setState(p=> ({...p, settings:{...p.settings, autoWeek: e.target.checked}}))} /><span></span></span>
+              </label>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button className="btn" onClick=${exportData}>⬇️ 내보내기</button>
+            <label className="btn cursor-pointer">⬆️ 가져오기
+              <input type="file" accept="application/json" className="hidden" onChange=${e=>{ const f=e.target.files&&e.target.files[0]; if(f) importData(f); }}/>
+            </label>
+          </div>
+        </div>
+
+        <div className="grid md:grid-cols-3 gap-4">
+          <div className="card p-4">
+            <div className="text-lg font-semibold mb-3">🛡️ 프로필</div>
+            <div className="grid grid-cols-3 gap-3 items-end">
+              <div><div className="label">레벨</div><input className="input" type="number" value=${state.profile.level} onChange=${e=> setState(p=>({...p, profile:{...p.profile, level:Number(e.target.value)}}))} /></div>
+              <div><div className="label">경험치</div><input className="input" type="number" value=${state.profile.xp} onChange=${e=> setState(p=>({...p, profile:{...p.profile, xp:Number(e.target.value)}}))} /></div>
+              <div><div className="label">다음 레벨 필요치</div><input className="input" type="number" value=${state.profile.nextLevelXp} onChange=${e=> setState(p=>({...p, profile:{...p.profile, nextLevelXp:Number(e.target.value)}}))} /></div>
+            </div>
+          </div>
+
+          <div className="card p-4">
+            <div className="text-lg font-semibold mb-3">📅 오늘</div>
+            <div className="grid gap-3">
+              <div className="flex items-center gap-2">
+                <input className="input" type="date" value=${selectedDate} onChange=${e=> setSelectedDate(e.target.value)} />
+                <button className="btn" onClick=${() => setSelectedDate(todayStr)}>오늘</button>
+              </div>
+              <div className="flex items-center justify-between"><div className="text-sm text-slate-600">달성률</div><div className="text-lg font-semibold">${percent(completionRateToday)}%</div></div>
+              ${ProgressBar({ value: completionRateToday })}
+              <div className="flex items-center justify-between"><div className="text-sm text-slate-600">미니보스 승률</div><div className="text-lg font-semibold">${minibossChance}%</div></div>
+              ${day.shieldUsed ? html`<div className="text-sm text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-xl p-2">오늘 방어막 적용됨: 페널티/소멸 면제</div>` : html``}
+              <div className="grid grid-cols-2 gap-2">
+                <button className="btn" onClick=${() => {
+                  if(day.settled) return;
+                  if(state.inventory.items['성실 방어막'] == null){ alert('“성실 방어막” 아이템이 없어요. 설정 → 아이템 관리에서 추가할 수 있어요.'); return; }
+                  if(state.inventory.items['성실 방어막'] <= 0){ alert('성실 방어막이 없습니다.'); return; }
+                  setState(prev => {
+                    const inv = JSON.parse(JSON.stringify(prev.inventory));
+                    addItemWithCap(inv, prev.itemDefs, '성실 방어막', -1);
+                    const nd = {...day, shieldUsed:true};
+                    return {...prev, inventory: inv, days: {...prev.days, [selectedDate]: nd}};
+                  });
+                  playSfx('click');
+                }} disabled=${day.settled || day.shieldUsed || (state.inventory.items['성실 방어막']||0)<=0}>🛡 성실 방어막 사용</button>
+                ${day.settled ? html`<div className="btn btn-ghost">정산 완료</div>` : html`<button className="btn btn-primary" onClick=${() => settleDay()}>🗡️ 하루 끝 · 정산</button>`}
+              </div>
+              ${day.settled && html`<div className="grid grid-cols-2 gap-2">
+                <button className="btn" onClick=${() => undoSettle()}>↩️ 정산 취소</button>
+                <div className="text-xs text-slate-600 flex items-center">보상/결과: ${day.rewardText||'-'}</div>
+              </div>`}
+            </div>
+          </div>
+
+          <div className="card p-4">
+            <div className="text-lg font-semibold mb-3">🏆 주간 진행(주간 목표 기준)</div>
+            <div className="space-y-3">
+              <div className="text-sm text-slate-600">이번 주(${weekKey}~) 종합</div>
+              ${ProgressBar({ value: weekPct })}
+              <div className="text-sm">${Math.round(weekPct*100)}%</div>
+              <div className="space-y-2">
+                ${(wkItems||[]).map(it => html`
+                  <label key=${it.id} className="flex items-center gap-2 border rounded-xl p-2">
+                    <input type="checkbox" checked=${!!it.done} onChange=${e=> updateChecklist(cur => ({...cur, items: cur.items.map(x => x.id===it.id? {...x, done:e.target.checked}: x)}))} />
+                    <span>${it.title}</span>
+                  </label>
+                `)}
+              </div>
+              <div className="text-xs text-slate-500">* 제목/구성은 “주간 목표 설정” 탭에서 바꿀 수 있어요.</div>
+            </div>
+          </div>
+        </div>
+
+        ${Tabs({ tabs: [
+          { key:'missions', label:'오늘의 미션', content: Missions({ day, state, setState, selectedDate, playSfx }) },
+          { key:'weekly', label:'주간 목표 설정', content: WeeklySetupTab({ state, setState, selectedDate }) },
+          { key:'report', label:'주차 리포트', content: ReportTab({ state }) },
+          { key:'inventory', label:'인벤토리', content: InventoryPanel({ state, setState }) },
+          { key:'recommend', label:'추천 미션', content: RecommendedTab({ state, setState, onAdd: (t) => setState(prev=> ({...prev, days:{...prev.days, [selectedDate]: {...day, missions:[...day.missions, { id: uuid(), title:t.title, category:t.category, plannedXp:t.plannedXp||0, pixelate:!!t.pixelate, done:false }] }}})) }) },
+          { key:'settings', label:'설정', content: SettingsTab({ state, setState }) },
+        ]})}
+
+        ${state.ui.showLevelModal && html`
+          <div className="modal">
+            <div className="card p-4 max-w-lg w-full">
+              <div className="text-base font-semibold mb-2">🎁 레벨업 보상 선택 (${state.ui.levelChoicesRemaining}회 남음)</div>
+              <div className="grid grid-cols-2 gap-2">
+                ${state.itemDefs.map(d => html`
+                  <button key=${d.id} className="btn" onClick=${() => claimLevelReward(d.name)}>${d.name} +1</button>
+                `)}
+              </div>
+              <div className="text-xs text-slate-500 mt-2">* 각 아이템의 보유 제한(cap)을 초과하면 지급되지 않습니다.</div>
+              <div className="mt-3 text-right">
+                <button className="btn btn-ghost" onClick=${() => setState(p => ({...p, ui:{...p.ui, showLevelModal:false, levelChoicesRemaining:0}}))}>건너뛰기</button>
+              </div>
+            </div>
+          </div>
+        `}
+
+        <div className="text-center text-xs text-slate-500 py-6">© ${new Date().getFullYear()} 성실 레벨 업 프로젝트 · PWA</div>
+      </div>`;
+    }
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(html`<${App} />`);
+  </script>
+</body>
+</html>
