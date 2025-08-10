@@ -1,1 +1,0 @@
-# diligence2-pwa
