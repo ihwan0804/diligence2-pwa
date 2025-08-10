@@ -1,4 +1,4 @@
-const CACHE_NAME = "dlu-cache-v3fix";
+const CACHE_NAME = "dlu-cache-v4-nobabel";
 const CORE_ASSETS = [
   "./","./index.html","./manifest.json",
   "./icon-192.png","./icon-512.png",
